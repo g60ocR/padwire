@@ -5,8 +5,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbDeviceConnection
@@ -61,6 +63,21 @@ class ForwardService : Service() {
     private var device: UsbDevice? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
+    /// Stop when the controller is unplugged.
+    ///
+    /// Without this the service keeps a descriptor for a device that no longer
+    /// exists: the exporter still advertises the old bus id, `runningPort()`
+    /// is still non-zero so a restart is refused with "already forwarding",
+    /// and nothing short of force-stopping the app recovers it. Tearing down
+    /// instead means a replug re-fires USB_DEVICE_ATTACHED and forwarding
+    /// simply resumes, which is the whole interaction this app is meant to
+    /// have.
+    ///
+    /// A controller that re-enumerates — a nudged cable, a firmware reset —
+    /// looks exactly like an unplug followed by a plug, so this covers that
+    /// too.
+    private var detachReceiver: BroadcastReceiver? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -90,6 +107,32 @@ class ForwardService : Service() {
         startForeground(NOTIFICATION_ID, buildNotification(dev, port))
 
         return if (begin(dev, port, prefetch)) START_STICKY else { stopSelf(); START_NOT_STICKY }
+    }
+
+    private fun watchForDetach(dev: UsbDevice) {
+        val r = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                if (intent.action != UsbManager.ACTION_USB_DEVICE_DETACHED) return
+                @Suppress("DEPRECATION")
+                val gone: UsbDevice? =
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+                    } else {
+                        intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+                    }
+                if (gone?.deviceName != dev.deviceName) return
+                Log.i(TAG, "${dev.deviceName} was detached; stopping")
+                stopSelf()
+            }
+        }
+        detachReceiver = r
+        val filter = IntentFilter(UsbManager.ACTION_USB_DEVICE_DETACHED)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(r, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(r, filter)
+        }
     }
 
     private fun begin(dev: UsbDevice, port: Int, prefetch: Boolean): Boolean {
@@ -127,6 +170,7 @@ class ForwardService : Service() {
             return false
         }
         Log.i(TAG, "forwarding ${dev.deviceName} on port $rc (prefetch=$prefetch)")
+        watchForDetach(dev)
         acquireWakeLock()
         if (rc != port) {
             // Bound somewhere else than asked; keep the notification honest.
@@ -144,6 +188,12 @@ class ForwardService : Service() {
     }
 
     private fun cleanup() {
+        detachReceiver?.let {
+            // Unregistering one that was never registered throws; the field is
+            // only ever set right after a successful registration.
+            runCatching { unregisterReceiver(it) }
+        }
+        detachReceiver = null
         NativeBridge.stop()
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
