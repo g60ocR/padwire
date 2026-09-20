@@ -26,7 +26,7 @@ fn serve_one(filter: DeviceFilter) -> (TcpStream, thread::JoinHandle<()>) {
             filter,
             max_transfer: 1 << 20,
         };
-        let _ = handle(stream, peer, &source, &Registry::new(), &never_stop());
+        let _ = handle(stream, peer, &source, &Registry::new(), &never_stop(), false);
     });
     let client = TcpStream::connect(addr).expect("connect");
     client

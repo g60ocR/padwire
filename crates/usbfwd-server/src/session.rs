@@ -23,7 +23,9 @@ use std::time::Duration;
 use usb_backend::{SubmitError, UrbRequest, UsbBackend, UsbfsDevice};
 use usbfwd_common::{debug, error, info, trace, warn};
 use usbip_proto::io::{read_pdu, write_ret_submit, write_ret_unlink};
-use usbip_proto::pdu::{Body, RetSubmit};
+use usbip_proto::pdu::{Body, Direction, RetSubmit};
+
+use crate::prefetch::{Prefetch, Take};
 
 /// How many replies may queue up before the reaper has to wait for the
 /// network. Bounded on purpose: an unbounded queue in front of a stalled
@@ -59,11 +61,16 @@ pub fn run(
     stream: TcpStream,
     dev: Arc<UsbfsDevice>,
     shutting_down: &dyn Fn() -> bool,
+    prefetch_enabled: bool,
 ) -> io::Result<()> {
     let busid = dev.summary().busid.clone();
     let stop = Arc::new(AtomicBool::new(false));
     let stats = Arc::new(Stats::default());
     let max_transfer = dev.max_transfer();
+    let prefetch = Arc::new(Prefetch::new(dev.as_ref(), prefetch_enabled));
+    // Get a URB onto every prefetched endpoint before the client's first
+    // submit, so the very first report is already waiting.
+    prefetch.arm(dev.as_ref());
 
     let (tx, rx) = sync_channel::<Vec<u8>>(OUTBOX_DEPTH);
 
@@ -83,9 +90,10 @@ pub fn run(
         let stats = Arc::clone(&stats);
         let sock = stream.try_clone()?;
         let busid = busid.clone();
+        let prefetch = Arc::clone(&prefetch);
         thread::Builder::new()
             .name(format!("usbfwd-rx {busid}"))
-            .spawn(move || reaper_loop(dev, tx, &stop, &stats, sock, &busid))?
+            .spawn(move || reaper_loop(dev, tx, &stop, &stats, sock, &busid, prefetch))?
     };
 
     let result = reader_loop(
@@ -96,12 +104,14 @@ pub fn run(
         &stats,
         max_transfer,
         shutting_down,
+        &prefetch,
     );
 
     // Wind down in an order that cannot deadlock: signal, unblock both
     // directions of the socket, then drop the last sender so the writer's
     // channel closes once the reaper has dropped its own.
     stop.store(true, Ordering::SeqCst);
+    prefetch.shutdown(dev.as_ref());
     let _ = stream.shutdown(Shutdown::Both);
     drop(tx);
     let _ = reaper.join();
@@ -127,6 +137,7 @@ fn reader_loop(
     stats: &Stats,
     max_transfer: usize,
     shutting_down: &dyn Fn() -> bool,
+    prefetch: &Prefetch,
 ) -> io::Result<()> {
     let mut sock = stream;
     while !stop.load(Ordering::Relaxed) && !shutting_down() {
@@ -169,6 +180,30 @@ fn reader_loop(
                     req.dir,
                     req.buffer_length
                 );
+                if req.dir == Direction::In {
+                    // 0x80 back on: the prefetcher is keyed by full address.
+                    match prefetch.take(req.ep | 0x80, seqnum, req.buffer_length) {
+                        Take::Ready(data) => {
+                            stats.completed.fetch_add(1, Ordering::Relaxed);
+                            trace!("<- prefetched seq={seqnum} len={}", data.len());
+                            let mut buf = Vec::with_capacity(48 + data.len());
+                            let ret = RetSubmit {
+                                status: 0,
+                                actual_length: data.len() as i32,
+                                ..Default::default()
+                            };
+                            if write_ret_submit(&mut buf, seqnum, ret, &data).is_ok()
+                                && !post(tx, stop, buf)
+                            {
+                                return Ok(());
+                            }
+                            continue;
+                        }
+                        // Registered; the reaper answers when a report lands.
+                        Take::Waiting => continue,
+                        Take::PassThrough => {}
+                    }
+                }
                 match dev.submit(req) {
                     Ok(()) => {
                         stats.submitted.fetch_add(1, Ordering::Relaxed);
@@ -198,7 +233,13 @@ fn reader_loop(
                 }
             }
             Body::CmdUnlink(u) => {
-                let cancelled = dev.unlink(u.unlink_seqnum)?;
+                // A client waiting on a prefetched endpoint has no usbfs URB
+                // of its own to discard, so ask the prefetcher first.
+                let cancelled = if prefetch.unlink(u.unlink_seqnum) {
+                    true
+                } else {
+                    dev.unlink(u.unlink_seqnum)?
+                };
                 stats.unlinked.fetch_add(1, Ordering::Relaxed);
                 // -ECONNRESET if we caught it in flight, 0 if it had already
                 // completed. Either way the client now owns that URB's fate and
@@ -224,6 +265,7 @@ fn reaper_loop(
     stats: &Stats,
     sock: TcpStream,
     busid: &str,
+    prefetch: Arc<Prefetch>,
 ) {
     while !stop.load(Ordering::Relaxed) {
         let wake = match dev.wait(REAP_POLL) {
@@ -237,6 +279,35 @@ fn reaper_loop(
         if wake.ready {
             loop {
                 match dev.reap() {
+                    Ok(Some(c)) if Prefetch::owns(c.seqnum) => {
+                        // Ours, not the client's. It either answers a waiting
+                        // submit or gets buffered, and the endpoint re-arms.
+                        if c.unlinked {
+                            continue;
+                        }
+                        let d = prefetch.deliver(c.seqnum, c.status, c.data, dev.as_ref());
+                        if let Some((seqnum, status, data)) = d.reply {
+                            stats.completed.fetch_add(1, Ordering::Relaxed);
+                            trace!(
+                                "<- prefetch fill seq={seqnum} status={status} len={}",
+                                data.len()
+                            );
+                            let mut buf = Vec::with_capacity(48 + data.len());
+                            let ret = RetSubmit {
+                                status,
+                                actual_length: data.len() as i32,
+                                ..Default::default()
+                            };
+                            if write_ret_submit(&mut buf, seqnum, ret, &data).is_err() {
+                                break;
+                            }
+                            if !post(&tx, stop, buf) {
+                                stop.store(true, Ordering::SeqCst);
+                                break;
+                            }
+                        }
+                        continue;
+                    }
                     Ok(Some(c)) => {
                         if c.unlinked {
                             // The client was already told this URB was

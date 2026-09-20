@@ -29,15 +29,22 @@ class ForwardService : Service() {
     companion object {
         const val EXTRA_DEVICE = "device"
         const val EXTRA_PORT = "port"
+        const val EXTRA_PREFETCH = "prefetch"
         const val ACTION_STOP = "dev.usbfwd.STOP"
         private const val TAG = "usbfwd"
         private const val CHANNEL_ID = "forwarding"
         private const val NOTIFICATION_ID = 1
 
-        fun start(context: Context, device: UsbDevice, port: Int = 3240) {
+        fun start(
+            context: Context,
+            device: UsbDevice,
+            port: Int = 3240,
+            prefetch: Boolean = false,
+        ) {
             val i = Intent(context, ForwardService::class.java).apply {
                 putExtra(EXTRA_DEVICE, device)
                 putExtra(EXTRA_PORT, port)
+                putExtra(EXTRA_PREFETCH, prefetch)
             }
             context.startForegroundService(i)
         }
@@ -79,12 +86,13 @@ class ForwardService : Service() {
         }
 
         val port = intent?.getIntExtra(EXTRA_PORT, 3240) ?: 3240
+        val prefetch = intent?.getBooleanExtra(EXTRA_PREFETCH, false) ?: false
         startForeground(NOTIFICATION_ID, buildNotification(dev, port))
 
-        return if (begin(dev, port)) START_STICKY else { stopSelf(); START_NOT_STICKY }
+        return if (begin(dev, port, prefetch)) START_STICKY else { stopSelf(); START_NOT_STICKY }
     }
 
-    private fun begin(dev: UsbDevice, port: Int): Boolean {
+    private fun begin(dev: UsbDevice, port: Int, prefetch: Boolean): Boolean {
         val manager = getSystemService(Context.USB_SERVICE) as UsbManager
         val conn = manager.openDevice(dev)
         if (conn == null) {
@@ -112,13 +120,13 @@ class ForwardService : Service() {
             return false
         }
 
-        val rc = NativeBridge.start(conn.fileDescriptor, port, bindAny = true)
+        val rc = NativeBridge.start(conn.fileDescriptor, port, bindAny = true, prefetch = prefetch)
         if (rc < 0) {
             Log.e(TAG, "exporter failed to start: ${NativeBridge.describe(rc)}")
             cleanup()
             return false
         }
-        Log.i(TAG, "forwarding ${dev.deviceName} on port $rc")
+        Log.i(TAG, "forwarding ${dev.deviceName} on port $rc (prefetch=$prefetch)")
         acquireWakeLock()
         if (rc != port) {
             // Bound somewhere else than asked; keep the notification honest.

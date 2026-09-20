@@ -654,6 +654,28 @@ impl UsbBackend for UsbfsDevice {
         }
     }
 
+    fn interrupt_in_endpoints(&self) -> Vec<(u8, u16)> {
+        let Some(config) = self.descriptors.config(self.summary.config_value) else {
+            return Vec::new();
+        };
+        let mut out: Vec<(u8, u16)> = Vec::new();
+        // Alt setting 0 only. An endpoint that exists solely in a non-primary
+        // alt setting is not in use until the client issues SET_INTERFACE, and
+        // prefetching it would submit URBs to an endpoint the device is not
+        // currently presenting.
+        for alt in config.primary_alt_settings() {
+            for ep in &alt.endpoints {
+                if ep.is_in()
+                    && ep.transfer_type() == TransferType::Interrupt
+                    && !out.iter().any(|(a, _)| *a == ep.address)
+                {
+                    out.push((ep.address, ep.max_packet_size));
+                }
+            }
+        }
+        out
+    }
+
     fn cancel_pending(&self) {
         let seqnums: Vec<u32> = self
             .state

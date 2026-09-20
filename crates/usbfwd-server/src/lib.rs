@@ -8,6 +8,7 @@
 //! everything below it — the handshake, the allow-list check, the one-importer
 //! rule, the URB pump — is shared.
 
+pub mod prefetch;
 pub mod registry;
 pub mod session;
 
@@ -145,6 +146,12 @@ pub struct Config {
     pub max_transfer: usize,
     pub mdns: bool,
     pub name: Option<String>,
+    /// Keep an interrupt IN URB queued on the device at all times, so a
+    /// client's submit can be answered from input captured before it arrived.
+    /// Halves how old a report is by the time it lands, at the cost of
+    /// answering with state the client did not explicitly ask for. See
+    /// [`crate::prefetch`].
+    pub prefetch: bool,
 }
 
 impl Default for Config {
@@ -156,6 +163,7 @@ impl Default for Config {
             max_transfer: DEFAULT_MAX_TRANSFER,
             mdns: false,
             name: None,
+            prefetch: false,
         }
     }
 }
@@ -194,7 +202,13 @@ pub fn run(args: Config) -> std::io::Result<()> {
 
     let _mdns = if args.mdns { start_mdns(&args) } else { None };
 
-    accept_loop(listeners, source, &Registry::new(), signal_stop());
+    accept_loop(
+        listeners,
+        source,
+        &Registry::new(),
+        signal_stop(),
+        args.prefetch,
+    );
     info!("shutting down");
     Ok(())
 }
@@ -254,6 +268,7 @@ pub fn accept_loop(
     source: Arc<dyn DeviceSource>,
     registry: &Arc<Registry>,
     stop: Stop,
+    prefetch: bool,
 ) {
     // poll() over every listener keeps this to one thread and lets the loop
     // notice a shutdown request within a quarter second.
@@ -312,7 +327,9 @@ pub fn accept_loop(
             let spawned = thread::Builder::new()
                 .name(format!("usbfwd {peer}"))
                 .spawn(move || {
-                    if let Err(e) = handle(stream, peer, source.as_ref(), &registry, &stop) {
+                    if let Err(e) =
+                        handle(stream, peer, source.as_ref(), &registry, &stop, prefetch)
+                    {
                         warn!("{peer}: {e}");
                     }
                     live_for_thread.lock().unwrap().remove(&id);
@@ -364,6 +381,7 @@ pub fn handle(
     source: &dyn DeviceSource,
     registry: &Arc<Registry>,
     stop: &Stop,
+    prefetch: bool,
 ) -> std::io::Result<()> {
     // Without this, Nagle batches small writes and adds tens of milliseconds
     // to every input report. It is the single most important socket option
@@ -383,7 +401,7 @@ pub fn handle(
             // From here on the client drives the pace, so the handshake
             // timeout has to go or a long-idle import would be torn down.
             stream.set_read_timeout(None)?;
-            import(stream, peer, &busid, source, registry, stop)
+            import(stream, peer, &busid, source, registry, stop, prefetch)
         }
         None => {
             warn!("{peer}: unsupported USB/IP request");
@@ -399,6 +417,7 @@ fn import(
     source: &dyn DeviceSource,
     registry: &Arc<Registry>,
     stop: &Stop,
+    prefetch: bool,
 ) -> std::io::Result<()> {
     let refuse = |s: &mut TcpStream, why: &str| -> std::io::Result<()> {
         warn!("{peer}: refusing to export {busid}: {why}");
@@ -438,7 +457,7 @@ fn import(
         summary.speed
     );
 
-    let result = session::run(stream, Arc::clone(&dev), stop.as_ref());
+    let result = session::run(stream, Arc::clone(&dev), stop.as_ref(), prefetch);
     dev.release_all();
     drop(lease);
     result

@@ -13,7 +13,7 @@
 //! ```kotlin
 //! object NativeBridge {
 //!     init { System.loadLibrary("usbfwd") }
-//!     external fun nativeStart(fd: Int, port: Int, bindAny: Int): Int
+//!     external fun nativeStart(fd: Int, port: Int, bindAny: Int, prefetch: Int): Int
 //!     external fun nativeStop(): Int
 //!     external fun nativeIsRunning(): Int
 //! }
@@ -110,9 +110,10 @@ pub extern "C" fn Java_dev_usbfwd_NativeBridge_nativeStart(
     fd: c_int,
     port: c_int,
     bind_any: c_int,
+    prefetch: c_int,
 ) -> c_int {
     init_logging();
-    start(fd, port, bind_any != 0)
+    start(fd, port, bind_any != 0, prefetch != 0)
 }
 
 /// Stop the server and release the device. Idempotent.
@@ -139,7 +140,7 @@ pub extern "C" fn Java_dev_usbfwd_NativeBridge_nativeIsRunning(
 // ----------------------------------------------------------------- the guts
 
 /// The same logic as the exported entry points, callable from Rust tests.
-pub fn start(fd: c_int, port: c_int, bind_any: bool) -> c_int {
+pub fn start(fd: c_int, port: c_int, bind_any: bool, prefetch: bool) -> c_int {
     let mut state = match STATE.lock() {
         Ok(g) => g,
         Err(_) => return ERR_INTERNAL,
@@ -205,6 +206,7 @@ pub fn start(fd: c_int, port: c_int, bind_any: bool) -> c_int {
         } else {
             usbfwd_server::Config::default().port
         },
+        prefetch,
         ..Default::default()
     };
 
@@ -232,6 +234,7 @@ pub fn start(fd: c_int, port: c_int, bind_any: bool) -> c_int {
                 source,
                 &Registry::new(),
                 Arc::new(move || flag.load(Ordering::Relaxed)),
+                prefetch,
             );
             // Dropping the last reference here releases the interfaces and
             // closes our duplicate of the descriptor.
@@ -289,14 +292,14 @@ mod tests {
     fn a_descriptor_that_is_not_a_usb_device_is_rejected() {
         let f = std::fs::File::open("/dev/null").expect("open /dev/null");
         use std::os::fd::AsRawFd;
-        let rc = start(f.as_raw_fd(), 0, true);
+        let rc = start(f.as_raw_fd(), 0, true, false);
         assert!(rc < 0, "expected an error code, got {rc}");
         assert_eq!(running_port(), None, "a failed start must leave no state");
     }
 
     #[test]
     fn a_closed_descriptor_is_rejected() {
-        let rc = start(-1, 0, true);
+        let rc = start(-1, 0, true, false);
         assert_eq!(rc, ERR_BAD_DESCRIPTOR);
     }
 }

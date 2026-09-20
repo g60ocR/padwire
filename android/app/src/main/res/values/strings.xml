@@ -5,4 +5,5 @@
     <string name="channel_description">Shown while a USB device is being forwarded.</string>
     <string name="notification_title">Forwarding %1$s</string>
     <string name="notification_text">Listening on port %1$d</string>
+    <string name="prefetch_label">Low-latency prefetch (keeps a URB queued)</string>
 </resources>

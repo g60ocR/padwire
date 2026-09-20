@@ -14,6 +14,7 @@ import android.os.Bundle
 import android.util.Log
 import android.view.Gravity
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.TextView
 
@@ -37,6 +38,7 @@ class MainActivity : Activity() {
 
     private lateinit var status: TextView
     private lateinit var toggle: Button
+    private lateinit var prefetchBox: CheckBox
 
     /// Set between asking the service to start and the native port appearing.
     ///
@@ -72,11 +74,16 @@ class MainActivity : Activity() {
 
         status = TextView(this).apply { setPadding(0, 0, 0, 48) }
         toggle = Button(this).apply { setOnClickListener { onToggle() } }
+        prefetchBox = CheckBox(this).apply {
+            text = getString(R.string.prefetch_label)
+            isChecked = false
+        }
         setContentView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             setPadding(64, 64, 64, 64)
             addView(status)
+            addView(prefetchBox)
             addView(toggle)
         })
 
@@ -173,9 +180,14 @@ class MainActivity : Activity() {
     /// the native port shows up, so the button never invites a second tap
     /// that would stop what the first one started.
     private fun beginStarting(device: UsbDevice) {
-        ForwardService.start(this, device, PORT)
+        val prefetch = prefetchBox.isChecked
+        ForwardService.start(this, device, PORT, prefetch)
         starting = true
-        status.text = "Starting %04x:%04x…".format(device.vendorId, device.productId)
+        status.text = "Starting %04x:%04x%s…".format(
+            device.vendorId,
+            device.productId,
+            if (prefetch) " with prefetch" else "",
+        )
         toggle.text = "Stop"
         toggle.postDelayed({
             starting = false
@@ -202,6 +214,7 @@ class MainActivity : Activity() {
                 "On the host:\n  usbip attach -r <this tablet> -b <busid>\n" +
                 "or let usbfwd-attach do it."
             toggle.text = "Stop"
+            prefetchBox.isEnabled = false
             return
         }
         val manager = getSystemService(Context.USB_SERVICE) as UsbManager
@@ -221,5 +234,6 @@ class MainActivity : Activity() {
                 }
         }
         toggle.text = "Start"
+        prefetchBox.isEnabled = true
     }
 }

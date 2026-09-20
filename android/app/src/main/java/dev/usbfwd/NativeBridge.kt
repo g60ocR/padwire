@@ -20,7 +20,7 @@ object NativeBridge {
     const val ERR_BIND_FAILED = -4
     const val ERR_INTERNAL = -5
 
-    private external fun nativeStart(fd: Int, port: Int, bindAny: Int): Int
+    private external fun nativeStart(fd: Int, port: Int, bindAny: Int, prefetch: Int): Int
     private external fun nativeStop(): Int
     private external fun nativeIsRunning(): Int
 
@@ -31,10 +31,15 @@ object NativeBridge {
      * but the `UsbDeviceConnection` it came from must stay open for as long as
      * the exporter runs, or the kernel will tear the device state down.
      *
+     * [prefetch] keeps an interrupt IN URB queued on the device so a client's
+     * submit can be answered from input captured before it arrived. Worth
+     * having whenever the round trip is more than a few milliseconds; it
+     * changes what a submit means, so it is opt-in.
+     *
      * @return the bound TCP port, or a negative `ERR_*` value.
      */
-    fun start(fd: Int, port: Int = 3240, bindAny: Boolean = true): Int =
-        nativeStart(fd, port, if (bindAny) 1 else 0)
+    fun start(fd: Int, port: Int = 3240, bindAny: Boolean = true, prefetch: Boolean = false): Int =
+        nativeStart(fd, port, if (bindAny) 1 else 0, if (prefetch) 1 else 0)
 
     fun stop() {
         nativeStop()

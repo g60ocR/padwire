@@ -198,6 +198,11 @@ pub trait UsbBackend: Send + Sync {
     /// Reap one completion, or `None` if none are ready.
     fn reap(&self) -> io::Result<Option<UrbCompletion>>;
 
+    /// Interrupt IN endpoints, as `(address, max_packet_size)` with the
+    /// direction bit still set on the address. These are the ones worth
+    /// prefetching: they are where a HID device's input reports arrive.
+    fn interrupt_in_endpoints(&self) -> Vec<(u8, u16)>;
+
     /// Cancel every URB still in flight and drain what the cancellations
     /// complete, leaving no pending seqnums behind.
     ///

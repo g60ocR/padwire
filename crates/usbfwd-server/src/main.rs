@@ -37,6 +37,12 @@ OPTIONS:
     --mdns               Advertise _usbip._tcp on the LAN. Off by default and
                          useless over Tailscale, which does not carry multicast.
     --name <NAME>        mDNS instance name [default: the hostname]
+    --prefetch           Keep an interrupt IN URB queued on the device, so a
+                         client's submit is answered from input captured
+                         before it arrived. Roughly halves how old a report is
+                         by the time it lands, which is worth having on a link
+                         with a round trip above a few milliseconds. Changes
+                         what a submit means, so it is off by default.
     --list               Print the exportable devices and exit
     -v, --verbose        Raise the log level (repeatable)
     -q, --quiet          Errors only
@@ -69,6 +75,7 @@ impl Default for Args {
                 max_transfer: DEFAULT_MAX_TRANSFER,
                 mdns: false,
                 name: None,
+                prefetch: false,
             },
             list: false,
             level: None,
@@ -114,6 +121,7 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
                 a.cfg.max_transfer = v.parse().map_err(|_| format!("`{v}` is not a size"))?;
             }
             "--mdns" => a.cfg.mdns = true,
+            "--prefetch" => a.cfg.prefetch = true,
             "--name" => a.cfg.name = Some(value("--name")?),
             "--list" => a.list = true,
             "--verbose" => verbosity += 1,
