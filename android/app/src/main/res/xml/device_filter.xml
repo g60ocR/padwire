@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Valve's vendor id is 0x28de = 10462. Android's device filter wants decimal.
+    Leaving the product id out matches every Valve device, which covers the
+    Proteus puck (0x1304), the Nereid receiver (0x1305) and the 2026 wired
+    controller, whose product id is not published anywhere yet.
+-->
+<resources>
+    <usb-device vendor-id="10462" />
+</resources>

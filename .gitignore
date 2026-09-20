@@ -1,0 +1,9 @@
+target/
+**/*.rs.bk
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+
+# cargo-ndk output; rebuild with `./gradlew cargoNdkBuild`
+android/app/src/main/jniLibs/

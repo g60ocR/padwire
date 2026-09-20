@@ -1,0 +1,12 @@
+[package]
+name = "usb-backend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "usbfs (USBDEVFS) USB device access for the usbfwd exporter"
+
+[dependencies]
+libc = { workspace = true }
+usbfwd-common = { workspace = true }
+usbip-proto = { workspace = true }

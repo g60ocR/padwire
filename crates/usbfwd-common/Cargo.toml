@@ -1,0 +1,10 @@
+[package]
+name = "usbfwd-common"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Logging, signal handling, network interface discovery and mDNS shared by the usbfwd binaries"
+
+[dependencies]
+libc = { workspace = true }

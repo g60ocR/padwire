@@ -1,0 +1,39 @@
+# usbfwd exporter, as a systemd *user* service.
+#
+# A user unit rather than a system one, for two reasons: the udev rule above
+# grants access through the seat's ACL, and on SteamOS a user unit in
+# ~/.config lives on the writable partition, so an OS update cannot remove it.
+#
+# Install:
+#     mkdir -p ~/.config/systemd/user ~/.local/bin
+#     cp usbfwd-server ~/.local/bin/
+#     cp usbfwd-server.service ~/.config/systemd/user/
+#     systemctl --user daemon-reload
+#     systemctl --user enable --now usbfwd-server
+#     sudo loginctl enable-linger $USER    # keep it running when logged out
+
+[Unit]
+Description=usbfwd USB/IP exporter
+Documentation=https://github.com/kws/usbfwd
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/usbfwd-server
+# The default bind is the tailnet, and the server waits for Tailscale to come
+# up rather than failing, so no ordering dependency on tailscaled is needed.
+Restart=always
+RestartSec=5
+Environment=USBFWD_LOG=info
+
+# It only ever needs its own USB nodes and a socket.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=default.target

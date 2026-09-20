@@ -1,0 +1,17 @@
+[package]
+name = "usbfwd-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "USB/IP exporter for the Steam Deck and other Linux hosts"
+
+[[bin]]
+name = "usbfwd-server"
+path = "src/main.rs"
+
+[dependencies]
+libc = { workspace = true }
+usb-backend = { workspace = true }
+usbfwd-common = { workspace = true }
+usbip-proto = { workspace = true }

@@ -1,0 +1,17 @@
+[package]
+name = "usbfwd-attach"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Host-side daemon that keeps configured USB/IP devices attached to vhci-hcd"
+
+[[bin]]
+name = "usbfwd-attach"
+path = "src/main.rs"
+
+[dependencies]
+libc = { workspace = true }
+usb-backend = { workspace = true }
+usbfwd-common = { workspace = true }
+usbip-proto = { workspace = true }

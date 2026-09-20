@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">usbfwd</string>
+    <string name="channel_name">USB forwarding</string>
+    <string name="channel_description">Shown while a USB device is being forwarded.</string>
+    <string name="notification_title">Forwarding %1$s</string>
+    <string name="notification_text">Listening on port %1$d</string>
+</resources>

@@ -1,0 +1,19 @@
+# usbfwd — let the exporter reach Valve USB devices without root.
+#
+# USBDEVFS_DISCONNECT and USBDEVFS_CLAIMINTERFACE need nothing more than write
+# access to the /dev/bus/usb node, so a udev rule replaces sudo entirely. That
+# matters most on SteamOS, where the root filesystem is immutable and running a
+# service as root is awkward.
+#
+# TAG+="uaccess" grants an ACL to whoever is logged in at the seat, which is
+# the right model for a handheld: the exporter runs as a user service.
+#
+# Install to /etc/udev/rules.d/99-usbfwd.rules, then:
+#     sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+# On a headless machine there is no seat, so uaccess grants nothing. Use a
+# group instead by replacing the TAG with, e.g.:
+#     GROUP="usbfwd"
+# and adding the service user to that group.
+
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="28de", MODE="0660", TAG+="uaccess"

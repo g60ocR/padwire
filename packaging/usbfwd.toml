@@ -1,0 +1,37 @@
+# usbfwd.toml — static endpoints are primary; discovery is optional.
+#
+# Multicast does not cross a tailnet, so over Tailscale there is nothing to
+# discover: the host has to be told where the exporter lives. Use the MagicDNS
+# name rather than an IP, so the config keeps working when addresses change.
+#
+# Read from the first of:
+#   /etc/usbfwd/usbfwd.toml
+#   $XDG_CONFIG_HOME/usbfwd/usbfwd.toml
+#   ./usbfwd.toml
+
+[[server]]
+name    = "steamdeck"
+host    = "steamdeck.tailnet-name.ts.net"   # MagicDNS, or a raw IP
+port    = 3240
+# 28de:1304 is the Proteus puck, 28de:1305 the Nereid receiver. The 2026 wired
+# controller's product id is not published, so the wildcard covers it — but it
+# also covers the Deck's own controls (28de:1205), which you almost certainly
+# do not want forwarded, since it makes the Deck's own UI uncontrollable.
+devices = ["28de:1304", "28de:1305"]
+auto_attach = true
+
+# [[server]]
+# name = "tablet"
+# host = "tablet.tailnet-name.ts.net"
+
+[discovery]
+mdns = false        # LAN convenience only; cannot work over Tailscale
+
+# [attach]
+# poll_interval    = 5     # seconds between checks when everything is steady
+# retry_min        = 2     # backoff floor for an unreachable server
+# retry_max        = 60    # backoff ceiling
+# connect_timeout  = 3
+# usbip            = "usbip"
+# modprobe         = true  # load vhci-hcd at startup
+# stop_after_first = true  # one controller is almost always what you want

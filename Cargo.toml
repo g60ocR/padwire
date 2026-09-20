@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/usbip-proto",
+    "crates/usb-backend",
+    "crates/usbfwd-common",
+    "crates/usbfwd-server",
+    "crates/usbfwd-attach",
+    "crates/usbfwd-jni",
+]
+# usbfwd-jni is an Android-only cdylib; keep it out of the default host build.
+default-members = [
+    "crates/usbip-proto",
+    "crates/usb-backend",
+    "crates/usbfwd-common",
+    "crates/usbfwd-server",
+    "crates/usbfwd-attach",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+license = "MIT"
+repository = "https://github.com/kws/usbfwd"
+
+[workspace.dependencies]
+libc = "0.2"
+usbip-proto = { path = "crates/usbip-proto" }
+usb-backend = { path = "crates/usb-backend" }
+usbfwd-common = { path = "crates/usbfwd-common" }
+
+[profile.release]
+opt-level = 2
+lto = true
+codegen-units = 1
+strip = true

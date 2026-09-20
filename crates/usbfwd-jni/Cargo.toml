@@ -1,0 +1,17 @@
+[package]
+name = "usbfwd-jni"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "JNI shim exposing the usbfwd exporter to the Android app"
+
+[lib]
+name = "usbfwd"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+libc = { workspace = true }
+usb-backend = { workspace = true }
+usbfwd-common = { workspace = true }
+usbfwd-server = { path = "../usbfwd-server" }

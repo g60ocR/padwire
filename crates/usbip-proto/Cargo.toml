@@ -1,0 +1,9 @@
+[package]
+name = "usbip-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "USB/IP 1.1.1 wire format: encode/decode only, no I/O policy"
+
+[dependencies]

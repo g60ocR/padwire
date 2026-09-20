@@ -1,0 +1,38 @@
+# usbfwd auto-attach, on the machine running Sunshine and Steam.
+#
+# This one is a system service: writing to vhci-hcd's sysfs attach file and
+# loading the module both need root.
+#
+# Install:
+#     sudo cp usbfwd-attach /usr/local/bin/
+#     sudo mkdir -p /etc/usbfwd && sudo cp usbfwd.toml /etc/usbfwd/
+#     sudo cp usbfwd-attach.service /etc/systemd/system/
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now usbfwd-attach
+
+[Unit]
+Description=usbfwd USB/IP auto-attach
+Documentation=https://github.com/kws/usbfwd
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/usbfwd-attach
+Restart=always
+RestartSec=5
+Environment=USBFWD_LOG=info
+
+# An exporter that is switched off is the normal state, so the daemon never
+# exits over it; a non-zero exit here means the configuration is wrong.
+RestartPreventExitStatus=2
+
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target
