@@ -107,6 +107,23 @@ cargo build --release              # or:
 
 ### 2. On the exporter (Steam Deck)
 
+The short path — copy `scripts/install-deck.sh`, the static `usbfwd-server`,
+`packaging/99-usbfwd.rules` and `packaging/usbfwd-server.service` into one
+directory on the Deck, then:
+
+```sh
+./install-deck.sh --dry-run --deck-controls    # what it would do, no root needed
+sudo ./install-deck.sh --deck-controls         # do it
+```
+
+Root is needed for exactly two things — the udev rule and `enable-linger` —
+and everything else is installed as the desktop user, because that is where the
+exporter belongs. It writes the unit with the flags it chose, refuses to
+forward `28de:1205` without a `--toggle-chord`, and `--uninstall` undoes all of
+it.
+
+The same steps by hand:
+
 ```sh
 sudo cp packaging/99-usbfwd.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
@@ -358,8 +375,14 @@ forward, and input latency measured rather than inferred from round-trip time.
 The toggle has been exercised everywhere it does not need a Deck: the wire
 behaviour (a suspended device leaves `OP_REP_DEVLIST` and is refused by name)
 runs against this machine's real bus in the protocol tests, and `hidraw`
-discovery finds the puck's five nodes. What a Deck would settle is the button
-bit table and how the handover feels in practice.
+discovery finds the puck's five nodes.
+
+On a real Deck (SteamOS, kernel 6.16), the static musl binary runs, lists its
+own controls as `28de:1205` with five interfaces, and `--chord-probe` finds
+their three `hidraw` nodes and **decodes their state reports** — so the report
+header and the offset of the 64-bit button field are right on the hardware.
+What is still open is the bit *positions*, which need somebody holding the
+buttons, and how the handover feels in practice.
 
 ## Gotchas
 

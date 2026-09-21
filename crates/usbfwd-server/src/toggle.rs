@@ -407,11 +407,12 @@ pub fn probe(filter: &DeviceFilter) -> io::Result<()> {
                     continue;
                 }
                 last.insert(busid.clone(), mask);
-                println!(
-                    "{busid}  0x{mask:016x}  {}\n          --toggle-chord '{}'",
-                    chord::describe(mask),
-                    chord::describe(mask)
-                );
+                let names = chord::describe(mask);
+                println!("{busid}  0x{mask:016x}  {names}");
+                // Nothing held is the resting state, not a candidate chord.
+                if mask != 0 {
+                    println!("          --toggle-chord '{names}'");
+                }
             }
         }
     }
