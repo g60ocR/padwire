@@ -17,3 +17,11 @@
 # and adding the service user to that group.
 
 SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="28de", MODE="0660", TAG+="uaccess"
+
+# --toggle-chord needs one thing more: read access to the device's hidraw
+# nodes. That is how the chord is noticed while the device is *not* being
+# forwarded — the exporter has released it, so the only way back in is the node
+# the rebound driver creates. Without this rule the chord can suspend a forward
+# and never resume it, which on a handheld means the controls come back and the
+# forward does not. Read-only and non-exclusive: Steam keeps its own handle.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="28de", MODE="0660", TAG+="uaccess"

@@ -15,8 +15,14 @@ host    = "steamdeck.tailnet-name.ts.net"   # MagicDNS, or a raw IP
 port    = 3240
 # 28de:1304 is the Proteus puck, 28de:1305 the Nereid receiver. The 2026 wired
 # controller's product id is not published, so the wildcard covers it — but it
-# also covers the Deck's own controls (28de:1205), which you almost certainly
-# do not want forwarded, since it makes the Deck's own UI uncontrollable.
+# also covers the Deck's own controls (28de:1205), which make the Deck's own UI
+# uncontrollable while they are forwarded.
+#
+# Add "28de:1205" here to forward those too — but only once the exporter runs
+# with --toggle-chord, which is what gives you a way to take them back. The
+# suspended device simply leaves the exporter's device list, so nothing on this
+# side needs configuring for it: the loop below waits for it exactly as it
+# waits for a controller that is not plugged in.
 devices = ["28de:1304", "28de:1305"]
 auto_attach = true
 

@@ -18,14 +18,17 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use usb_backend::{SubmitError, UrbRequest, UsbBackend, UsbfsDevice};
+use usb_backend::{SubmitError, UrbCompletion, UrbRequest, UsbBackend, UsbfsDevice};
 use usbfwd_common::{debug, error, info, trace, warn};
 use usbip_proto::io::{read_pdu, write_ret_submit, write_ret_unlink};
 use usbip_proto::pdu::{Body, Direction, RetSubmit};
 
+use crate::chord::Detector;
 use crate::prefetch::{Prefetch, Take};
+use crate::toggle::Hotkey;
+use crate::SessionOpts;
 
 /// How many replies may queue up before the reaper has to wait for the
 /// network. Bounded on purpose: an unbounded queue in front of a stalled
@@ -61,13 +64,13 @@ pub fn run(
     stream: TcpStream,
     dev: Arc<UsbfsDevice>,
     shutting_down: &dyn Fn() -> bool,
-    prefetch_enabled: bool,
+    opts: &SessionOpts,
 ) -> io::Result<()> {
     let busid = dev.summary().busid.clone();
     let stop = Arc::new(AtomicBool::new(false));
     let stats = Arc::new(Stats::default());
     let max_transfer = dev.max_transfer();
-    let prefetch = Arc::new(Prefetch::new(dev.as_ref(), prefetch_enabled));
+    let prefetch = Arc::new(Prefetch::new(dev.as_ref(), opts.prefetch));
     // Get a URB onto every prefetched endpoint before the client's first
     // submit, so the very first report is already waiting.
     prefetch.arm(dev.as_ref());
@@ -91,9 +94,10 @@ pub fn run(
         let sock = stream.try_clone()?;
         let busid = busid.clone();
         let prefetch = Arc::clone(&prefetch);
+        let hotkey = opts.hotkey.clone();
         thread::Builder::new()
             .name(format!("usbfwd-rx {busid}"))
-            .spawn(move || reaper_loop(dev, tx, &stop, &stats, sock, &busid, prefetch))?
+            .spawn(move || reaper_loop(dev, tx, &stop, &stats, sock, &busid, prefetch, hotkey))?
     };
 
     let result = reader_loop(
@@ -266,7 +270,12 @@ fn reaper_loop(
     sock: TcpStream,
     busid: &str,
     prefetch: Arc<Prefetch>,
+    hotkey: Option<Hotkey>,
 ) {
+    // The one place every report the device produces passes through, whether
+    // it was prefetched or submitted by the client, which is what makes it the
+    // right place to watch for the chord.
+    let mut detector = hotkey.as_ref().map(|h| h.detector());
     while !stop.load(Ordering::Relaxed) {
         let wake = match dev.wait(REAP_POLL) {
             Ok(w) => w,
@@ -276,15 +285,17 @@ fn reaper_loop(
             }
         };
 
+        let mut chord_fired = false;
         if wake.ready {
             loop {
                 match dev.reap() {
-                    Ok(Some(c)) if Prefetch::owns(c.seqnum) => {
+                    Ok(Some(mut c)) if Prefetch::owns(c.seqnum) => {
                         // Ours, not the client's. It either answers a waiting
                         // submit or gets buffered, and the endpoint re-arms.
                         if c.unlinked {
                             continue;
                         }
+                        chord_fired |= screen(detector.as_mut(), &mut c);
                         let d = prefetch.deliver(c.seqnum, c.status, c.data, dev.as_ref());
                         if let Some((seqnum, status, data)) = d.reply {
                             stats.completed.fetch_add(1, Ordering::Relaxed);
@@ -308,13 +319,14 @@ fn reaper_loop(
                         }
                         continue;
                     }
-                    Ok(Some(c)) => {
+                    Ok(Some(mut c)) => {
                         if c.unlinked {
                             // The client was already told this URB was
                             // cancelled; a second completion would confuse it.
                             trace!("<- dropping completion for unlinked seq={}", c.seqnum);
                             continue;
                         }
+                        chord_fired |= screen(detector.as_mut(), &mut c);
                         stats.completed.fetch_add(1, Ordering::Relaxed);
                         trace!(
                             "<- complete seq={} status={} len={}",
@@ -348,6 +360,21 @@ fn reaper_loop(
             }
         }
 
+        // Acted on only once the reap loop has drained, so the reports that
+        // were already queued behind the chord still reach the client and the
+        // prefetcher's bookkeeping is left consistent.
+        if chord_fired {
+            if let Some(h) = hotkey.as_ref() {
+                h.toggle.suspend(busid);
+                info!(
+                    "{busid}: {} held; suspending the forward and handing the device back. \
+                     Hold it again to resume.",
+                    h.chord
+                );
+            }
+            break;
+        }
+
         if wake.gone {
             // Drained above; usbfs keeps completions reapable after a
             // disconnect, so nothing in flight is lost silently.
@@ -358,6 +385,28 @@ fn reaper_loop(
     stop.store(true, Ordering::SeqCst);
     // Unblock the reader, which is otherwise sitting in read().
     let _ = sock.shutdown(Shutdown::Both);
+}
+
+/// Feed one completion to the chord detector, and blank it if the chord is
+/// down. Returns true when the chord has been held long enough to fire.
+///
+/// Blanking rather than dropping: a dropped completion is a submit the client
+/// never gets an answer to, and `usbhid` only resubmits an interrupt IN URB
+/// when the previous one completes, so dropping would stall input rather than
+/// hide one report. A zero-length interrupt IN transfer is ordinary — devices
+/// send them — and the HID core discards it without passing anything to
+/// `hidraw`, so the chord never reaches the importer as input.
+fn screen(detector: Option<&mut Detector>, c: &mut UrbCompletion) -> bool {
+    let Some(d) = detector else { return false };
+    if c.status != 0 || c.data.is_empty() {
+        return false;
+    }
+    let v = d.feed(&c.data, Instant::now());
+    if v.swallow {
+        c.data.clear();
+        c.actual_length = 0;
+    }
+    v.fired
 }
 
 fn writer_loop(rx: Receiver<Vec<u8>>, mut out: TcpStream, stop: &AtomicBool, busid: &str) {
@@ -410,8 +459,74 @@ fn post(tx: &SyncSender<Vec<u8>>, stop: &AtomicBool, buf: Vec<u8>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chord::{Chord, DECK_STATE};
     use usbip_proto::io::read_ret_submit;
     use usbip_proto::pdu::Direction;
+
+    fn completion(data: Vec<u8>) -> UrbCompletion {
+        UrbCompletion {
+            seqnum: 1,
+            status: 0,
+            actual_length: data.len(),
+            data,
+            unlinked: false,
+        }
+    }
+
+    /// A 64-byte Deck state report with these buttons down.
+    fn state(buttons: u64) -> Vec<u8> {
+        let mut r = vec![0u8; 64];
+        r[0] = 0x01;
+        r[2] = DECK_STATE;
+        r[3] = 60;
+        r[8..16].copy_from_slice(&buttons.to_le_bytes());
+        r
+    }
+
+    #[test]
+    fn a_held_chord_is_blanked_rather_than_dropped() {
+        let chord: Chord = "l4+r4".parse().unwrap();
+        // A zero hold fires on the first report, which is all this needs to
+        // check; the timing itself is tested in `chord`.
+        let mut d = Some(Detector::new(chord, Duration::ZERO));
+
+        // A detector starts disarmed, so the chord has to be seen up once.
+        screen(d.as_mut(), &mut completion(state(0)));
+
+        let mut c = completion(state(chord.mask()));
+        assert!(screen(d.as_mut(), &mut c), "the chord should have fired");
+        assert!(c.data.is_empty(), "the chord must not reach the importer");
+        assert_eq!(
+            c.actual_length, 0,
+            "a blanked completion has to say so, or the client reads stale length"
+        );
+
+        // Ordinary input is untouched.
+        let mut c = completion(state(0x80));
+        assert!(!screen(d.as_mut(), &mut c));
+        assert_eq!(c.data, state(0x80));
+        assert_eq!(c.actual_length, 64);
+    }
+
+    #[test]
+    fn nothing_is_screened_without_a_chord_or_on_a_failed_urb() {
+        let mut c = completion(state(u64::MAX));
+        assert!(!screen(None, &mut c), "no toggle configured");
+        assert_eq!(c.actual_length, 64, "and the report is left alone");
+
+        let chord: Chord = "l4+r4".parse().unwrap();
+        let mut d = Some(Detector::new(chord, Duration::ZERO));
+        screen(d.as_mut(), &mut completion(state(0)));
+        let mut failed = UrbCompletion {
+            status: -libc::EPIPE,
+            ..completion(state(chord.mask()))
+        };
+        assert!(
+            !screen(d.as_mut(), &mut failed),
+            "a stalled endpoint reports no buttons"
+        );
+        assert_eq!(failed.actual_length, 64);
+    }
 
     #[test]
     fn a_rejected_submit_encodes_as_a_zero_length_completion() {

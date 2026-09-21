@@ -20,6 +20,13 @@ After=network.target
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/usbfwd-server
+# Forwarding the Deck's own controls (28de:1205) takes the handheld's UI away
+# for as long as the session lasts, so pair it with a chord that gives it back:
+#   ExecStart=%h/.local/bin/usbfwd-server --allow 28de:1205 --toggle-chord L4+R4
+# Confirm the chord against the hardware first with `usbfwd-server --chord-probe`.
+# ExecReload sends SIGHUP, which puts every suspended device back on offer —
+# the way out that does not need the controller.
+ExecReload=/bin/kill -HUP $MAINPID
 # The default bind is the tailnet, and the server waits for Tailscale to come
 # up rather than failing, so no ordering dependency on tailscaled is needed.
 Restart=always

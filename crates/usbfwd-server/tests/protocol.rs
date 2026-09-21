@@ -7,26 +7,38 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use usb_backend::{enumerate, DeviceFilter};
 use usbfwd_server::registry::Registry;
-use usbfwd_server::{handle, never_stop, SysfsDevices};
+use usbfwd_server::toggle::{Gated, Toggle};
+use usbfwd_server::{handle, never_stop, DeviceSource, SessionOpts, SysfsDevices};
 use usbip_proto::op::{self, OP_REP_DEVLIST, OP_REP_IMPORT, ST_NA, ST_OK};
 use usbip_proto::{OpHeader, SIZE_OP_HEADER};
 
+fn sysfs(filter: DeviceFilter) -> Arc<dyn DeviceSource> {
+    Arc::new(SysfsDevices {
+        filter,
+        max_transfer: 1 << 20,
+    })
+}
+
 /// Serve exactly one connection with the real handler, then return.
-fn serve_one(filter: DeviceFilter) -> (TcpStream, thread::JoinHandle<()>) {
+fn serve_one(source: Arc<dyn DeviceSource>) -> (TcpStream, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
     let addr = listener.local_addr().unwrap();
     let h = thread::spawn(move || {
         let (stream, peer) = listener.accept().expect("accept");
-        let source = SysfsDevices {
-            filter,
-            max_transfer: 1 << 20,
-        };
-        let _ = handle(stream, peer, &source, &Registry::new(), &never_stop(), false);
+        let _ = handle(
+            stream,
+            peer,
+            source.as_ref(),
+            &Registry::new(),
+            &never_stop(),
+            &SessionOpts::default(),
+        );
     });
     let client = TcpStream::connect(addr).expect("connect");
     client
@@ -35,13 +47,17 @@ fn serve_one(filter: DeviceFilter) -> (TcpStream, thread::JoinHandle<()>) {
     (client, h)
 }
 
-fn exchange(filter: DeviceFilter, request: &[u8]) -> Vec<u8> {
-    let (mut c, h) = serve_one(filter);
+fn exchange_with(source: Arc<dyn DeviceSource>, request: &[u8]) -> Vec<u8> {
+    let (mut c, h) = serve_one(source);
     c.write_all(request).expect("send request");
     let mut reply = Vec::new();
     c.read_to_end(&mut reply).expect("read reply");
     h.join().unwrap();
     reply
+}
+
+fn exchange(filter: DeviceFilter, request: &[u8]) -> Vec<u8> {
+    exchange_with(sysfs(filter), request)
 }
 
 #[test]
@@ -118,12 +134,64 @@ fn a_traversal_style_busid_is_refused_rather_than_resolved() {
     }
 }
 
+/// The toggle's whole contract on the wire: a suspended device is not there.
+/// Nothing new is said to the importer — it sees exactly what it would see for
+/// a device that had been unplugged, which is why its reconnect loop needs no
+/// changes to cope with the chord.
+#[test]
+fn a_suspended_device_is_neither_listed_nor_importable() {
+    let filter: DeviceFilter = "*:*".parse().unwrap();
+    let Some(present) = enumerate::list(&filter)
+        .unwrap_or_default()
+        .into_iter()
+        .next()
+    else {
+        return; // no USB devices on this machine
+    };
+    let toggle = Toggle::new();
+    let source: Arc<dyn DeviceSource> =
+        Arc::new(Gated::new(sysfs(filter.clone()), Arc::clone(&toggle)));
+
+    let listed = |source: Arc<dyn DeviceSource>| -> Vec<String> {
+        let reply = exchange_with(source, &op::encode_devlist_request());
+        op::decode_devlist_reply_body(&reply[SIZE_OP_HEADER..])
+            .expect("decode devlist")
+            .into_iter()
+            .map(|d| d.busid)
+            .collect()
+    };
+
+    assert!(listed(Arc::clone(&source)).contains(&present.busid));
+
+    toggle.suspend(&present.busid);
+    assert!(
+        !listed(Arc::clone(&source)).contains(&present.busid),
+        "a suspended device must leave the device list"
+    );
+    let reply = exchange_with(
+        Arc::clone(&source),
+        &op::encode_import_request(&present.busid),
+    );
+    assert_eq!(reply.len(), SIZE_OP_HEADER, "a refusal carries no record");
+    assert_eq!(
+        OpHeader::from_bytes(&reply).unwrap().status,
+        ST_NA,
+        "importing it by name must be refused too"
+    );
+
+    // Resuming puts it back on offer. Checked through the device list rather
+    // than an import, because importing for real would claim the interfaces
+    // of whatever is plugged into the machine running this test.
+    toggle.resume(&present.busid);
+    assert!(listed(source).contains(&present.busid));
+}
+
 #[test]
 fn a_wrong_protocol_version_is_rejected() {
     let mut req = op::encode_devlist_request();
     req[0] = 0x01;
     req[1] = 0x06; // version 1.0.6
-    let (mut c, h) = serve_one(DeviceFilter::default());
+    let (mut c, h) = serve_one(sysfs(DeviceFilter::default()));
     c.write_all(&req).unwrap();
     let mut reply = Vec::new();
     let _ = c.read_to_end(&mut reply);

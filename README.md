@@ -65,7 +65,7 @@ from.
 | `crates/usbip-proto` | USB/IP 1.1.1 wire format. Encode/decode only, no I/O policy. |
 | `crates/usb-backend` | usbfs (`USBDEVFS_*`) device access: descriptors, claiming, the URB queue. |
 | `crates/usbfwd-common` | Logging, signals, interface discovery, mDNS. |
-| `crates/usbfwd-server` | The exporter: listener, device source, URB pump. |
+| `crates/usbfwd-server` | The exporter: listener, device source, URB pump, chord toggle. |
 | `crates/usbfwd-attach` | The host daemon: config, vhci sysfs, reconnect loop. |
 | `crates/usbfwd-jni` | `int`-only JNI shim for Android. |
 | `android/` | Kotlin app: permission → descriptor → foreground service. |
@@ -174,6 +174,73 @@ See [`android/README.md`](android/README.md). Short version: build the native
 library with `cargo ndk`, install the APK, plug the controller in. The
 `USB_DEVICE_ATTACHED` intent filter launches the app and grants permission
 implicitly, so plugging in is the whole interaction.
+
+## Forwarding the Deck's own controls
+
+The Deck's built-in controls are an ordinary USB device (`28de:1205`) on an
+internal hub, so forwarding them needs no new code at all — but it costs you
+the machine you are holding: the exporter evicts the kernel's driver, and the
+Deck's UI stops responding until the session ends. `--toggle-chord` makes that
+reversible from the controller itself.
+
+```sh
+usbfwd-server --chord-probe                       # read the chord off the hardware
+usbfwd-server --allow 28de:1205 --toggle-chord L4+R4
+```
+
+Hold the chord while it is forwarded and the Deck takes its controls back; hold
+it again and the host gets them back. Add `28de:1205` to the host's `devices`
+list and the reattach is automatic.
+
+**"Off" means the device is not on offer.** That is the whole design, and it is
+why nothing else had to change:
+
+* the session ends, so the interfaces are released and rebound through the
+  teardown path a detach already uses;
+* the bus id leaves `OP_REP_DEVLIST` and `OP_REQ_IMPORT` is answered `ST_NA`,
+  which `usbfwd-attach` already treats as "not plugged in yet" and waits out;
+* the chord is read back off `hidraw` — the node the rebound driver has just
+  created — and the device goes back on offer, so the host's next poll attaches
+  it again.
+
+**Where the chord is noticed.** While a session is live, every input report
+passes through the reaper on its way to the socket, so that is the one place
+that sees them all whether they were prefetched or submitted by the client.
+With no session there are no URBs at all, so the same detector reads the same
+reports from `hidraw` instead — non-exclusive, so Steam on the Deck keeps its
+own handle throughout.
+
+**The chord does not reach the host.** A report with the chord down is answered
+as a zero-length interrupt IN transfer rather than dropped: dropping would
+leave a submit unanswered, and `usbhid` only resubmits when the previous URB
+completes, so it would stall input rather than hide one report. A zero-length
+transfer is ordinary, and the HID core discards it without handing anything to
+`hidraw`.
+
+**The way back, when the way back is broken.** Resuming needs read access to
+`/dev/hidraw*`; the udev rule in `packaging/` grants it. Without it the chord
+can suspend a forward it cannot resume, so a watcher that cannot open a node
+leaves the device **suspended** and says so in the log every 30 s — the person
+holding the Deck keeps their controls, which is the point of the feature. The
+lever that needs no controller is `SIGHUP`:
+
+```sh
+systemctl --user reload usbfwd-server    # or: kill -HUP $(pidof usbfwd-server)
+```
+
+Known costs, none of them hidden:
+
+* **Each toggle is a real USB disconnect and reconnect on the host.** Steam
+  re-detects the controller, games may announce it, and the player index can
+  move. USB/IP forwards whole devices, so there is no way to forward part of
+  the pad and keep the rest local.
+* **Pick buttons nothing else uses.** While the device is *not* forwarded the
+  Deck's own Steam sees the chord too, and nothing here can stop it.
+* **The button-name table is the one unverified part.** `chord::BUTTONS`
+  follows SDL's Deck layout, and no Deck was available to confirm it against.
+  If a name does not fire, `--chord-probe` prints the bits the device actually
+  sends and `--toggle-chord b41+b42` or `--toggle-chord 0x60000000000` takes
+  them directly.
 
 ## Verifying it works
 
@@ -288,6 +355,12 @@ step), `urbnum` climbing ~38/s, and Steam holding its `hidraw` node throughout.
 Not yet verified: Steam exposing gyro, trackpads and haptics through the
 forward, and input latency measured rather than inferred from round-trip time.
 
+The toggle has been exercised everywhere it does not need a Deck: the wire
+behaviour (a suspended device leaves `OP_REP_DEVLIST` and is refused by name)
+runs against this machine's real bus in the protocol tests, and `hidraw`
+discovery finds the puck's five nodes. What a Deck would settle is the button
+bit table and how the handover feels in practice.
+
 ## Gotchas
 
 1. **Steam on the exporting side fights you for the controller.** The exporter
@@ -307,9 +380,12 @@ forward, and input latency measured rather than inferred from round-trip time.
    and answers a second importer with `ST_NA`.
 6. **Tailscale's 1280-byte MTU plus USB/IP's chattiness** means large
    descriptor reads fragment. Harmless, but do not be surprised in a capture.
-7. **Forwarding the Deck's own controls** (`28de:1205`) works but makes the
-   Deck's UI uncontrollable while active. The shipped config lists the puck and
-   receiver ids explicitly rather than `28de:*` for exactly this reason.
+7. **Forwarding the Deck's own controls** (`28de:1205`) makes the Deck's UI
+   uncontrollable while active, which is what `--toggle-chord` exists for — see
+   [Forwarding the Deck's own controls](#forwarding-the-decks-own-controls).
+   The shipped config still lists the puck and receiver ids explicitly rather
+   than `28de:*`, so nothing starts forwarding a handheld's own pad by
+   accident.
 
 ## Scope
 
@@ -327,8 +403,9 @@ cargo test --workspace
 The suite covers the wire format against the layouts in
 `Documentation/usb/usbip_protocol.rst` and the in-tree drivers, the usbfs ioctl
 encodings and struct offsets against `<linux/usbdevice_fs.h>`, descriptor
-parsing against a synthesised 7-interface puck, and the full handshake over a
-loopback socket. Tests that need real hardware skip themselves when it is
+parsing against a synthesised 7-interface puck, the chord decoder and its
+hold timing against synthesised state reports, and the full handshake over a
+loopback socket — including a suspended device disappearing from it. Tests that need real hardware skip themselves when it is
 absent; `enumerate` and `vhci` tests run against the live machine when they can.
 
 Recorded device ids:

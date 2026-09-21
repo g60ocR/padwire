@@ -8,9 +8,11 @@
 //! everything below it — the handshake, the allow-list check, the one-importer
 //! rule, the URB pump — is shared.
 
+pub mod chord;
 pub mod prefetch;
 pub mod registry;
 pub mod session;
+pub mod toggle;
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -27,7 +29,9 @@ use usbfwd_common::{error, info, mdns, netif, signal, warn};
 use usbip_proto::io::{read_op_request, OpRequest};
 use usbip_proto::{op, USBIP_PORT};
 
+use chord::Chord;
 use registry::Registry;
+use toggle::{Gated, Hotkey, Toggle};
 
 /// A handful of importers is already more than the hardware can be shared
 /// with; the cap only exists so a connection flood cannot spawn threads
@@ -56,6 +60,12 @@ pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(8);
 /// accept loop's stack frame.
 pub type Stop = Arc<dyn Fn() -> bool + Send + Sync>;
 
+/// How long the toggle chord has to be held by default.
+///
+/// Long enough that it cannot be hit by accident mid-game, short enough that
+/// nobody wonders whether it worked.
+pub const DEFAULT_TOGGLE_HOLD: Duration = Duration::from_millis(1000);
+
 /// A stop predicate that never fires, for tests and one-shot callers.
 pub fn never_stop() -> Stop {
     Arc::new(|| false)
@@ -64,6 +74,21 @@ pub fn never_stop() -> Stop {
 /// The process-wide SIGINT/SIGTERM flag.
 pub fn signal_stop() -> Stop {
     Arc::new(signal::shutting_down)
+}
+
+/// Everything a session needs beyond the socket and the device.
+///
+/// One struct rather than a growing tail of `bool` arguments, because both of
+/// these are policy the caller chooses and neither is meaningful to the URB
+/// pump on its own.
+#[derive(Clone, Default)]
+pub struct SessionOpts {
+    /// Keep an interrupt IN URB queued on the device at all times. See
+    /// [`crate::prefetch`].
+    pub prefetch: bool,
+    /// Watch the forwarded input reports for the chord that suspends this
+    /// device. See [`crate::toggle`].
+    pub hotkey: Option<Hotkey>,
 }
 
 /// Where exportable devices come from.
@@ -152,6 +177,11 @@ pub struct Config {
     /// answering with state the client did not explicitly ask for. See
     /// [`crate::prefetch`].
     pub prefetch: bool,
+    /// Button chord that suspends and resumes a forward, or `None` to leave
+    /// the toggle off. See [`crate::toggle`].
+    pub toggle_chord: Option<Chord>,
+    /// How long the chord has to be held before it counts.
+    pub toggle_hold: Duration,
 }
 
 impl Default for Config {
@@ -164,6 +194,8 @@ impl Default for Config {
             mdns: false,
             name: None,
             prefetch: false,
+            toggle_chord: None,
+            toggle_hold: DEFAULT_TOGGLE_HOLD,
         }
     }
 }
@@ -177,10 +209,35 @@ pub fn run(args: Config) -> std::io::Result<()> {
 
     let listeners = bind_when_ready(&args)?;
 
-    let source: Arc<dyn DeviceSource> = Arc::new(SysfsDevices {
+    let mut source: Arc<dyn DeviceSource> = Arc::new(SysfsDevices {
         filter: args.filter.clone(),
         max_transfer: args.max_transfer,
     });
+
+    let mut opts = SessionOpts {
+        prefetch: args.prefetch,
+        hotkey: None,
+    };
+    let mut watcher = None;
+    if let Some(chord) = args.toggle_chord {
+        // The gate has to wrap the source before anything can be exported:
+        // a suspended device must be invisible to `OP_REP_DEVLIST` as well as
+        // to `OP_REQ_IMPORT`, and both go through `DeviceSource`.
+        let toggle = Toggle::new();
+        source = Arc::new(Gated::new(source, Arc::clone(&toggle)));
+        let hotkey = Hotkey {
+            chord,
+            hold: args.toggle_hold,
+            toggle,
+        };
+        opts.hotkey = Some(hotkey.clone());
+        let stop = signal_stop();
+        watcher = thread::Builder::new()
+            .name("usbfwd-toggle".into())
+            .spawn(move || toggle::watch(hotkey, stop))
+            .map_err(|e| warn!("toggle: cannot start the chord watcher: {e}"))
+            .ok();
+    }
 
     match source.list() {
         Ok(d) if d.is_empty() => info!(
@@ -200,15 +257,18 @@ pub fn run(args: Config) -> std::io::Result<()> {
         Err(e) => warn!("cannot enumerate devices: {e}"),
     }
 
+    // After the device list, so the warning lands next to the devices it is
+    // about rather than before anything has been named.
+    if args.toggle_chord.is_some() {
+        toggle::preflight(&args.filter);
+    }
+
     let _mdns = if args.mdns { start_mdns(&args) } else { None };
 
-    accept_loop(
-        listeners,
-        source,
-        &Registry::new(),
-        signal_stop(),
-        args.prefetch,
-    );
+    accept_loop(listeners, source, &Registry::new(), signal_stop(), opts);
+    if let Some(w) = watcher {
+        let _ = w.join();
+    }
     info!("shutting down");
     Ok(())
 }
@@ -268,7 +328,7 @@ pub fn accept_loop(
     source: Arc<dyn DeviceSource>,
     registry: &Arc<Registry>,
     stop: Stop,
-    prefetch: bool,
+    opts: SessionOpts,
 ) {
     // poll() over every listener keeps this to one thread and lets the loop
     // notice a shutdown request within a quarter second.
@@ -324,12 +384,11 @@ pub fn accept_loop(
             let counter = Arc::clone(&sessions);
             let live_for_thread = Arc::clone(&live);
             let stop = Arc::clone(&stop);
+            let opts = opts.clone();
             let spawned = thread::Builder::new()
                 .name(format!("usbfwd {peer}"))
                 .spawn(move || {
-                    if let Err(e) =
-                        handle(stream, peer, source.as_ref(), &registry, &stop, prefetch)
-                    {
+                    if let Err(e) = handle(stream, peer, source.as_ref(), &registry, &stop, &opts) {
                         warn!("{peer}: {e}");
                     }
                     live_for_thread.lock().unwrap().remove(&id);
@@ -381,7 +440,7 @@ pub fn handle(
     source: &dyn DeviceSource,
     registry: &Arc<Registry>,
     stop: &Stop,
-    prefetch: bool,
+    opts: &SessionOpts,
 ) -> std::io::Result<()> {
     // Without this, Nagle batches small writes and adds tens of milliseconds
     // to every input report. It is the single most important socket option
@@ -401,7 +460,7 @@ pub fn handle(
             // From here on the client drives the pace, so the handshake
             // timeout has to go or a long-idle import would be torn down.
             stream.set_read_timeout(None)?;
-            import(stream, peer, &busid, source, registry, stop, prefetch)
+            import(stream, peer, &busid, source, registry, stop, opts)
         }
         None => {
             warn!("{peer}: unsupported USB/IP request");
@@ -417,7 +476,7 @@ fn import(
     source: &dyn DeviceSource,
     registry: &Arc<Registry>,
     stop: &Stop,
-    prefetch: bool,
+    opts: &SessionOpts,
 ) -> std::io::Result<()> {
     let refuse = |s: &mut TcpStream, why: &str| -> std::io::Result<()> {
         warn!("{peer}: refusing to export {busid}: {why}");
@@ -457,7 +516,7 @@ fn import(
         summary.speed
     );
 
-    let result = session::run(stream, Arc::clone(&dev), stop.as_ref(), prefetch);
+    let result = session::run(stream, Arc::clone(&dev), stop.as_ref(), opts);
     dev.release_all();
     drop(lease);
     result

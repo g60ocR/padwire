@@ -29,7 +29,7 @@ use usb_backend::UsbBackend;
 use usbfwd_common::log::Level;
 use usbfwd_common::{error, info, log, netif};
 use usbfwd_server::registry::Registry;
-use usbfwd_server::{accept_loop, Bind, Config, SingleDevice};
+use usbfwd_server::{accept_loop, Bind, Config, SessionOpts, SingleDevice};
 
 /// Negative results from [`nativeStart`]. A success returns the bound port,
 /// which is always positive.
@@ -234,7 +234,13 @@ pub fn start(fd: c_int, port: c_int, bind_any: bool, prefetch: bool) -> c_int {
                 source,
                 &Registry::new(),
                 Arc::new(move || flag.load(Ordering::Relaxed)),
-                prefetch,
+                // No toggle on Android: the chord exists to give a handheld
+                // back its own controls, and the tablet's controller is a
+                // separate device it never loses.
+                SessionOpts {
+                    prefetch,
+                    hotkey: None,
+                },
             );
             // Dropping the last reference here releases the interfaces and
             // closes our duplicate of the descriptor.

@@ -11,6 +11,7 @@
 pub mod descriptors;
 pub mod enumerate;
 pub mod filter;
+pub mod hidraw;
 pub mod sys;
 pub mod usbfs;
 

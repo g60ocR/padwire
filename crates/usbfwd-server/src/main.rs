@@ -5,12 +5,13 @@
 //! and Android has no root. Both expose usbfs, so both can export.
 
 use std::process::ExitCode;
+use std::time::Duration;
 
 use usb_backend::usbfs::DEFAULT_MAX_TRANSFER;
 use usb_backend::DeviceFilter;
 use usbfwd_common::log::Level;
 use usbfwd_common::{error, log};
-use usbfwd_server::{print_list, run, Bind, Config};
+use usbfwd_server::{print_list, run, toggle, Bind, Config, DEFAULT_TOGGLE_HOLD};
 use usbip_proto::USBIP_PORT;
 #[cfg(test)]
 use {
@@ -43,6 +44,18 @@ OPTIONS:
                          by the time it lands, which is worth having on a link
                          with a round trip above a few milliseconds. Changes
                          what a submit means, so it is off by default.
+    --toggle-chord <SPEC>
+                         Button chord that suspends the forward and hands the
+                         device back to this machine, and that resumes it
+                         again. Off unless given. Names (`L4+R4`, `steam+l5`),
+                         bit numbers (`b41+b42`) or a raw mask (`0x...`).
+                         Only useful for a controller attached to the machine
+                         you are holding — above all the Deck's own 28de:1205,
+                         which is unusable locally while it is forwarded.
+    --toggle-hold <MS>   How long the chord must be held [default: 1000]
+    --chord-probe        Print the buttons the allowed devices are sending, so
+                         a chord can be read off the hardware, and exit. Reads
+                         hidraw only; safe to run while Steam has the device.
     --list               Print the exportable devices and exit
     -v, --verbose        Raise the log level (repeatable)
     -q, --quiet          Errors only
@@ -53,6 +66,13 @@ Port 3240 carries unencrypted USB traffic. The default bind keeps it on the
 tailnet, where Tailscale supplies the encryption and identity that USB/IP has
 none of. `--bind any` exposes it to every network the machine is attached to.
 
+A device suspended by the chord is simply not offered: it leaves the device
+list, importers are refused, and the importing daemon waits for it exactly as
+it waits for a device that is unplugged. Resuming needs read access to
+/dev/hidraw* — packaging/99-usbfwd.rules grants it — because that is the only
+way in once the kernel has the device back. SIGHUP puts everything on offer
+again without needing the controller.
+
 ENVIRONMENT:
     USBFWD_LOG           error | warn | info | debug | trace
 ";
@@ -60,6 +80,7 @@ ENVIRONMENT:
 struct Args {
     cfg: Config,
     list: bool,
+    probe: bool,
     level: Option<Level>,
 }
 
@@ -76,8 +97,11 @@ impl Default for Args {
                 mdns: false,
                 name: None,
                 prefetch: false,
+                toggle_chord: None,
+                toggle_hold: DEFAULT_TOGGLE_HOLD,
             },
             list: false,
+            probe: false,
             level: None,
         }
     }
@@ -121,6 +145,15 @@ fn parse_args(argv: Vec<String>) -> Result<Option<Args>, String> {
                 a.cfg.max_transfer = v.parse().map_err(|_| format!("`{v}` is not a size"))?;
             }
             "--mdns" => a.cfg.mdns = true,
+            "--toggle-chord" => a.cfg.toggle_chord = Some(value("--toggle-chord")?.parse()?),
+            "--toggle-hold" => {
+                let v = value("--toggle-hold")?;
+                let ms: u64 = v
+                    .parse()
+                    .map_err(|_| format!("`{v}` is not a number of milliseconds"))?;
+                a.cfg.toggle_hold = Duration::from_millis(ms);
+            }
+            "--chord-probe" => a.probe = true,
             "--prefetch" => a.cfg.prefetch = true,
             "--name" => a.cfg.name = Some(value("--name")?),
             "--list" => a.list = true,
@@ -160,6 +193,8 @@ fn main() -> ExitCode {
     }
     let result = if args.list {
         print_list(&args.cfg.filter)
+    } else if args.probe {
+        toggle::probe(&args.cfg.filter)
     } else {
         run(args.cfg)
     };
@@ -229,11 +264,32 @@ mod tests {
     }
 
     #[test]
+    fn the_toggle_is_off_unless_a_chord_is_given() {
+        assert!(args(&[]).unwrap().unwrap().cfg.toggle_chord.is_none());
+        let a = args(&["--toggle-chord", "L4+R4", "--toggle-hold", "250"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(a.cfg.toggle_chord, Some("b41+b42".parse().unwrap()));
+        assert_eq!(a.cfg.toggle_hold, Duration::from_millis(250));
+        assert_eq!(
+            args(&["--toggle-chord", "steam"])
+                .unwrap()
+                .unwrap()
+                .cfg
+                .toggle_hold,
+            DEFAULT_TOGGLE_HOLD,
+            "the hold has a usable default of its own"
+        );
+    }
+
+    #[test]
     fn bad_options_are_rejected() {
         assert!(args(&["--port", "not-a-port"]).is_err());
         assert!(args(&["--bind", "not-an-ip"]).is_err());
         assert!(args(&["--allow", "nonsense"]).is_err());
         assert!(args(&["--frobnicate"]).is_err());
+        assert!(args(&["--toggle-chord", "nonsense"]).is_err());
+        assert!(args(&["--toggle-hold", "soon"]).is_err());
         assert!(args(&["--port"]).is_err(), "a missing value must not panic");
     }
 

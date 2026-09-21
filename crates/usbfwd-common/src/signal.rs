@@ -7,9 +7,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+static HANGUP: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn handler(_sig: libc::c_int) {
     SHUTDOWN.store(true, Ordering::SeqCst);
+}
+
+extern "C" fn hangup(_sig: libc::c_int) {
+    HANGUP.store(true, Ordering::SeqCst);
 }
 
 /// Install the handler. Also ignores `SIGPIPE`, so a client vanishing
@@ -20,7 +25,22 @@ pub fn install() {
         libc::signal(libc::SIGINT, h);
         libc::signal(libc::SIGTERM, h);
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+        libc::signal(
+            libc::SIGHUP,
+            hangup as extern "C" fn(libc::c_int) as libc::sighandler_t,
+        );
     }
+}
+
+/// Take the pending `SIGHUP`, clearing it.
+///
+/// The exporter uses it as the way out of a toggle it cannot undo on its own:
+/// whatever the chord watcher is doing, a `SIGHUP` puts every withheld device
+/// back on offer. That matters because the toggle deliberately takes the
+/// controls away from the machine running this process, so there has to be a
+/// lever that does not need those controls to reach.
+pub fn take_hangup() -> bool {
+    HANGUP.swap(false, Ordering::SeqCst)
 }
 
 pub fn shutting_down() -> bool {
