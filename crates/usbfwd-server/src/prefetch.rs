@@ -159,7 +159,11 @@ impl Prefetch {
 
     /// A client submit arrived. Either hand back a captured report, register
     /// the client as waiting, or say this endpoint is not ours.
-    pub fn take(&self, address: u8, seqnum: u32, max_len: usize) -> Take {
+    ///
+    /// Also re-arms the endpoint if nothing is in flight. Normally a completion
+    /// re-arms it, but after a refused submit there is no completion to come,
+    /// and a client left waiting then would wait forever.
+    pub fn take(&self, dev: &dyn UsbBackend, address: u8, seqnum: u32, max_len: usize) -> Take {
         let Some(lock) = &self.inner else {
             return Take::PassThrough;
         };
@@ -170,15 +174,22 @@ impl Prefetch {
         if ep.disabled {
             return Take::PassThrough;
         }
-        if let Some(mut data) = ep.captured.pop_front() {
-            data.truncate(max_len);
-            return Take::Ready(data);
-        }
-        // Only one client submit can be outstanding per endpoint, because
-        // usbhid keeps exactly one URB in flight. If a second arrives, the
-        // first is stale by definition; answering the newer one is correct.
-        ep.waiting = Some(Waiter { seqnum, max_len });
-        Take::Waiting
+        let take = match ep.captured.pop_front() {
+            Some(mut data) => {
+                data.truncate(max_len);
+                Take::Ready(data)
+            }
+            None => {
+                // Only one client submit can be outstanding per endpoint,
+                // because usbhid keeps exactly one URB in flight. If a second
+                // arrives, the first is stale by definition; answering the
+                // newer one is correct.
+                ep.waiting = Some(Waiter { seqnum, max_len });
+                Take::Waiting
+            }
+        };
+        inner.arm_one(address, dev);
+        take
     }
 
     /// An internal URB completed. Returns what the reaper owes the client, if
@@ -284,7 +295,10 @@ impl Inner {
         let Some(ep) = self.eps.get_mut(&address) else {
             return;
         };
-        if ep.disabled || ep.in_flight.is_some() || ep.captured.len() == DEPTH {
+        // Armed even with the buffer full: a full buffer drops its oldest
+        // report when the next one lands. Refusing here instead would leave
+        // nothing in flight, and nothing would ever arm it again.
+        if ep.disabled || ep.in_flight.is_some() {
             return;
         }
         let req = UrbRequest {
@@ -340,7 +354,102 @@ mod tests {
     fn disabled_prefetch_passes_everything_through() {
         let p = Prefetch::disabled();
         assert!(!p.is_enabled());
-        assert_eq!(p.take(0x81, 7, 64), Take::PassThrough);
+        assert_eq!(p.take(&Fake::default(), 0x81, 7, 64), Take::PassThrough);
         assert!(!p.unlink(7));
+    }
+
+    /// Records submits and never completes anything on its own; the tests
+    /// complete URBs by calling `deliver`.
+    #[derive(Default)]
+    struct Fake {
+        submitted: Mutex<Vec<u32>>,
+        refuse: Mutex<bool>,
+    }
+
+    impl Fake {
+        fn last(&self) -> u32 {
+            *self
+                .submitted
+                .lock()
+                .unwrap()
+                .last()
+                .expect("something submitted")
+        }
+    }
+
+    impl UsbBackend for Fake {
+        fn summary(&self) -> &usb_backend::DeviceSummary {
+            unimplemented!("prefetch never asks")
+        }
+        fn claim_all(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn release_all(&self) {}
+        fn submit(&self, req: UrbRequest) -> Result<(), SubmitError> {
+            if *self.refuse.lock().unwrap() {
+                return Err(SubmitError::Urb(-libc::EAGAIN));
+            }
+            self.submitted.lock().unwrap().push(req.seqnum);
+            Ok(())
+        }
+        fn unlink(&self, _: u32) -> std::io::Result<bool> {
+            Ok(true)
+        }
+        fn wait(&self, _: std::time::Duration) -> std::io::Result<usb_backend::Wake> {
+            unimplemented!("prefetch never waits")
+        }
+        fn reap(&self) -> std::io::Result<Option<usb_backend::UrbCompletion>> {
+            Ok(None)
+        }
+        fn interrupt_in_endpoints(&self) -> Vec<(u8, u16)> {
+            vec![(0x81, 64)]
+        }
+        fn cancel_pending(&self) {}
+    }
+
+    fn in_flight(p: &Prefetch) -> Option<u32> {
+        p.inner.as_ref().unwrap().lock().unwrap().eps[&0x81].in_flight
+    }
+
+    #[test]
+    fn a_full_buffer_keeps_capturing_and_drops_the_oldest() {
+        // A streaming controller easily produces more reports in one round
+        // trip than the buffer holds. This used to stop arming at DEPTH, so
+        // once the client drained the buffer its next submit waited forever.
+        let dev = Fake::default();
+        let p = Prefetch::new(&dev, true);
+        p.arm(&dev);
+        for i in 0..6u8 {
+            p.deliver(dev.last(), 0, vec![i], &dev);
+        }
+        assert!(
+            in_flight(&p).is_some(),
+            "still capturing with the buffer full"
+        );
+
+        for want in 2..6u8 {
+            assert_eq!(p.take(&dev, 0x81, want as u32, 64), Take::Ready(vec![want]));
+        }
+        assert_eq!(p.take(&dev, 0x81, 10, 64), Take::Waiting);
+        let d = p.deliver(dev.last(), 0, vec![6], &dev);
+        assert_eq!(d.reply, Some((10, 0, vec![6])));
+    }
+
+    #[test]
+    fn a_client_submit_rearms_after_a_refused_one() {
+        let dev = Fake::default();
+        let p = Prefetch::new(&dev, true);
+        *dev.refuse.lock().unwrap() = true;
+        p.arm(&dev);
+        assert_eq!(in_flight(&p), None);
+
+        *dev.refuse.lock().unwrap() = false;
+        assert_eq!(p.take(&dev, 0x81, 1, 64), Take::Waiting);
+        assert!(
+            in_flight(&p).is_some(),
+            "the waiting client has a URB to answer it"
+        );
+        let d = p.deliver(dev.last(), 0, vec![9], &dev);
+        assert_eq!(d.reply, Some((1, 0, vec![9])));
     }
 }

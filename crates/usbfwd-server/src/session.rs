@@ -186,7 +186,7 @@ fn reader_loop(
                 );
                 if req.dir == Direction::In {
                     // 0x80 back on: the prefetcher is keyed by full address.
-                    match prefetch.take(req.ep | 0x80, seqnum, req.buffer_length) {
+                    match prefetch.take(dev.as_ref(), req.ep | 0x80, seqnum, req.buffer_length) {
                         Take::Ready(data) => {
                             stats.completed.fetch_add(1, Ordering::Relaxed);
                             trace!("<- prefetched seq={seqnum} len={}", data.len());
