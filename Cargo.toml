@@ -22,7 +22,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.70"
 license = "MIT"
-repository = "https://github.com/g60ocR/usbfwd"
+repository = "https://github.com/g60ocR/padwire"
 
 [workspace.dependencies]
 libc = "0.2"

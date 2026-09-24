@@ -12,7 +12,7 @@
 
 [Unit]
 Description=usbfwd USB/IP auto-attach
-Documentation=https://github.com/g60ocR/usbfwd
+Documentation=https://github.com/g60ocR/padwire
 After=network-online.target tailscaled.service
 Wants=network-online.target
 

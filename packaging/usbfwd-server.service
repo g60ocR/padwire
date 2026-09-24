@@ -16,7 +16,7 @@
 
 [Unit]
 Description=usbfwd USB/IP exporter
-Documentation=https://github.com/g60ocR/usbfwd
+Documentation=https://github.com/g60ocR/padwire
 After=network.target
 
 [Service]
