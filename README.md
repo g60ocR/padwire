@@ -122,11 +122,19 @@ exporter belongs. It writes the unit with the flags it chose, refuses to
 forward `28de:1205` without a `--toggle-chord`, and `--uninstall` undoes all of
 it.
 
+Everything survives a SteamOS update. The binary and the unit are in `/home`,
+and linger is in `/var`, which an update copies across. The udev rule is the
+exception: since SteamOS 3.6 an update discards any `/etc` change that is not on
+a keep-list, so the installer adds the rule to one in
+`/etc/atomic-update.conf.d/usbfwd.conf`.
+
 The same steps by hand:
 
 ```sh
 sudo cp packaging/99-usbfwd.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
+# keep the rule across SteamOS updates
+echo /etc/udev/rules.d/99-usbfwd.rules | sudo tee /etc/atomic-update.conf.d/usbfwd.conf
 
 mkdir -p ~/.local/bin ~/.config/systemd/user
 cp target/x86_64-unknown-linux-musl/release/usbfwd-server ~/.local/bin/

@@ -11,6 +11,12 @@
 # survives a SteamOS update, and the udev rule grants access through the seat's
 # ACL rather than through privilege.
 #
+# The udev rule is the one piece that would not survive on its own. Since
+# SteamOS 3.6 an OS update throws away every /etc change that is not on a
+# keep-list (see /usr/lib/rauc/atomic-update-keep.conf), so the installer adds
+# the rule to that list with a drop-in in /etc/atomic-update.conf.d/. Linger
+# lives in /var, which an update copies across whole.
+#
 # Expects to find, next to itself:
 #     usbfwd-server            the static musl binary
 #     99-usbfwd.rules          the udev rule
@@ -120,6 +126,7 @@ unit_dir="$home/.config/systemd/user"
 unit="$unit_dir/usbfwd-server.service"
 bin="$home/.local/bin/usbfwd-server"
 rule="/etc/udev/rules.d/99-usbfwd.rules"
+keep="/etc/atomic-update.conf.d/usbfwd.conf"
 
 # systemctl --user needs the user's own manager, which needs its runtime dir.
 as_user() {
@@ -133,7 +140,7 @@ as_user() {
 if [[ $uninstall -eq 1 ]]; then
     echo "Removing usbfwd from $user's account..."
     run as_user systemctl --user disable --now usbfwd-server.service 2>/dev/null || true
-    run rm -f "$unit" "$bin" "$rule"
+    run rm -f "$unit" "$bin" "$rule" "$keep"
     run as_user systemctl --user daemon-reload 2>/dev/null || true
     run udevadm control --reload-rules || true
     echo "Done. Linger is left enabled; turn it off with:"
@@ -172,6 +179,20 @@ echo "  allow-list : $allow"
 run install -m 0644 "$here/99-usbfwd.rules" "$rule"
 run udevadm control --reload-rules
 run udevadm trigger --subsystem-match=usb --subsystem-match=hidraw || true
+
+#    An OS update would otherwise delete the rule and leave a service that
+#    starts but can open nothing. Only where the atomic updater exists: on any
+#    other distro /etc is simply persistent.
+if [[ -d /usr/lib/rauc || -d /etc/atomic-update.conf.d ]]; then
+    if [[ $dry -eq 1 ]]; then
+        echo "  would write $keep with:"
+        echo "    $rule"
+    else
+        install -d -m 0755 /etc/atomic-update.conf.d
+        printf '%s\n' "# usbfwd: keep the udev rule across SteamOS updates." "$rule" >"$keep"
+        chmod 0644 "$keep"
+    fi
+fi
 
 # 2. The binary, owned by the user who will run it.
 run install -D -m 0755 -o "$user" -g "$group" "$here/usbfwd-server" "$bin"
@@ -236,6 +257,7 @@ echo "Installed:"
 echo "  $bin"
 echo "  $unit"
 echo "  $rule"
+[[ -f "$keep" ]] && echo "  $keep"
 echo
 "$bin" --version
 echo

@@ -3,6 +3,8 @@
 # A user unit rather than a system one, for two reasons: the udev rule above
 # grants access through the seat's ACL, and on SteamOS a user unit in
 # ~/.config lives on the writable partition, so an OS update cannot remove it.
+# The udev rule in /etc is another matter: SteamOS 3.6+ drops /etc changes on
+# update unless they are on a keep-list, which install-deck.sh takes care of.
 #
 # Install:
 #     mkdir -p ~/.config/systemd/user ~/.local/bin
