@@ -16,7 +16,7 @@
 
 [Unit]
 Description=usbfwd USB/IP exporter
-Documentation=https://github.com/kws/usbfwd
+Documentation=https://github.com/g60ocR/usbfwd
 After=network.target
 
 [Service]
