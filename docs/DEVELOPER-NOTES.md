@@ -1,5 +1,8 @@
 # Developer notes
 
+padwire's working name was *usbfwd*, which is why the crates, binaries,
+services and Android package all still use it.
+
 The internals behind [the README](../README.md): why the design is what it is,
 how the less obvious parts work, the bugs that shaped it, and what has and has
 not been verified on real hardware.
@@ -222,10 +225,12 @@ hardware. The toggle's wire behaviour (a suspended device leaves
 `OP_REP_DEVLIST` and is refused by name) runs against a real bus in the
 protocol tests.
 
-**Not yet verified:** Steam exposing gyro, trackpads and haptics through the
-forward; input latency measured rather than inferred from round-trip time; the
-chord's button bit positions with someone holding the buttons; and the udev
-rule surviving an actual SteamOS update.
+**Gyro, trackpads and haptics** work through the forward: Steam on the host
+exposes and uses all three.
+
+**Not yet verified:** input latency measured rather than inferred from
+round-trip time; the chord's button bit positions with someone holding the
+buttons; and the udev rule surviving an actual SteamOS update.
 
 ## Bugs found on real hardware
 

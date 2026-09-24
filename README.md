@@ -1,14 +1,23 @@
-# usbfwd
+# padwire
 
-Forward a Steam Controller — over its Proteus puck or a plain USB cable — from
-a Steam Deck or an Android tablet to the machine running Sunshine, so that host
-sees a native Steam Controller with full Steam Input while the game streams
-back over Moonlight.
+Use a Steam Controller, or a Steam Deck's own controls, on the Linux PC you
+stream games from. padwire forwards the controller over the network from a
+Steam Deck or an Android tablet to the host running Sunshine, so Steam there
+sees a native Steam Controller with full Steam Input, including gyro,
+trackpads and haptics, while the game streams back over Moonlight.
+
+> **The host must run Linux.** padwire relies on the Linux kernel's built-in
+> USB/IP support (`vhci-hcd`) to recreate the controller on the host. Windows
+> and macOS hosts are not supported.
 
 It does the one job people otherwise buy VirtualHere for, using USB/IP: an open
 protocol whose importing side is already in the Linux kernel. Nothing needs
 root on the tablet, nothing needs a kernel module on the Deck, and the host
 runs a stock kernel.
+
+**About the name:** padwire was developed as *usbfwd*, and the programs,
+services, config paths and Android app still use that working name:
+`usbfwd-server`, `usbfwd-attach`, `/etc/usbfwd/` and so on.
 
 ## How it works
 
@@ -52,8 +61,8 @@ the details.
 
 ## Requirements
 
-* **Host:** Linux with `vhci-hcd` (Fedora: `kernel-modules-extra`) and the
-  `usbip` tools, running Steam.
+* **Host:** Linux, with `vhci-hcd` (Fedora: `kernel-modules-extra`) and the
+  `usbip` tools, running Steam. Windows and macOS hosts will not work.
 * **Exporter:** a Steam Deck, or an Android tablet with USB host support.
 * **Network:** a low-latency path between the two: the same local network, or
   the same [Tailscale](https://tailscale.com) tailnet from anywhere. See
@@ -297,12 +306,12 @@ Other things that trip people up:
 ## Status
 
 Working end to end: the wired controller and the puck from an Android tablet
-over a real tailnet, and the puck through the whole stack on a Linux host. The
-Deck exporter runs on SteamOS and reads its own controls.
+over a real tailnet, and the puck through the whole stack on a Linux host,
+with Steam's gyro, trackpads and haptics working through the forward. The Deck exporter
+runs on SteamOS and reads its own controls.
 
-Not yet verified: Steam's gyro, trackpads and haptics through the forward;
-input latency measured rather than inferred; and the chord's button mapping
-with someone holding the buttons. See [what has been
+Not yet verified: input latency measured rather than inferred, and the
+chord's button mapping with someone holding the buttons. See [what has been
 verified](docs/DEVELOPER-NOTES.md#what-has-been-verified) for the detail.
 
 ## Development
