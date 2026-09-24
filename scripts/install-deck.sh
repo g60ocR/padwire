@@ -247,7 +247,10 @@ done
 
 as_user systemctl --user daemon-reload
 if [[ $start -eq 1 ]]; then
-    as_user systemctl --user enable --now usbfwd-server.service
+    # restart, not `enable --now`: on a re-install the service is already
+    # running, and --now would leave the old binary serving.
+    as_user systemctl --user enable usbfwd-server.service
+    as_user systemctl --user restart usbfwd-server.service
 else
     as_user systemctl --user enable usbfwd-server.service
 fi
