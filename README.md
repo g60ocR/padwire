@@ -318,4 +318,7 @@ bugs real hardware turned up.
 
 ## License
 
-MIT.
+MIT; see [`LICENSE`](LICENSE).
+
+usbfwd is not affiliated with or endorsed by Valve. Steam, Steam Deck and Steam
+Controller are trademarks of Valve Corporation.
